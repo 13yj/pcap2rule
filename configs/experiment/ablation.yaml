@@ -1,0 +1,73 @@
+# Ablation Study Configuration (Table III)
+
+experiment:
+  name: "ablation_study"
+  description: "Component ablation — single dataset, 8 configurations"
+  dataset: "CSE-CIC-IDS2018"
+
+configurations:
+  full:
+    dual_channel: true
+    rag: true
+    validation: true
+    generalization: true
+    lora: true
+    cot: true
+
+  minus_flow_only:
+    dual_channel: false
+    rag: true
+    validation: true
+    generalization: true
+    lora: true
+    cot: true
+    input_mode: "flow"
+
+  minus_payload_only:
+    dual_channel: false
+    rag: true
+    validation: true
+    generalization: true
+    lora: true
+    cot: true
+    input_mode: "payload"
+
+  minus_rag:
+    dual_channel: true
+    rag: false
+    validation: true
+    generalization: true
+    lora: true
+    cot: true
+
+  minus_validation:
+    dual_channel: true
+    rag: true
+    validation: false
+    generalization: true
+    lora: true
+    cot: true
+
+  minus_generalization:
+    dual_channel: true
+    rag: true
+    validation: true
+    generalization: false
+    lora: true
+    cot: true
+
+  minus_lora:
+    dual_channel: true
+    rag: true
+    validation: true
+    generalization: true
+    lora: false
+    cot: true
+
+  minus_cot:
+    dual_channel: true
+    rag: true
+    validation: true
+    generalization: true
+    lora: true
+    cot: false

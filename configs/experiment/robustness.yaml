@@ -1,0 +1,31 @@
+# Robustness Analysis Configuration (Table VI)
+
+experiment:
+  name: "robustness_analysis"
+  description: "Adversarial perturbation evaluation"
+  dataset: "CSE-CIC-IDS2018"
+
+perturbations:
+  payload_obfuscation:
+    enabled: true
+    url_encode_pct: 0.5
+    case_randomize: true
+    whitespace_insert: true
+
+  timing_perturbation:
+    enabled: true
+    delay_jitter_pct: 0.5  # +/- 50%
+
+  flow_fragmentation:
+    enabled: true
+    max_segments: 4
+    out_of_order: true
+
+  protocol_mimicry:
+    enabled: true
+    mimic_browser_ua: true
+    mimic_accept_headers: true
+
+  combined:
+    enabled: true
+    apply_all: true

@@ -1,0 +1,20 @@
+# Per-Attack-Type Analysis Configuration (Table V)
+
+experiment:
+  name: "per_attack_analysis"
+  description: "Breakdown of detection coverage by attack type"
+  dataset: "CSE-CIC-IDS2018"
+
+attack_types:
+  - "Brute Force"
+  - "DoS"
+  - "Web Attack"
+  - "Infiltration"
+  - "Botnet"
+  - "DDoS"
+  - "Heartbleed"
+
+baselines_for_comparison:
+  - "Pcap2Rule"
+  - "FALCON_Adapted"
+  - "Anomaly2Sign"

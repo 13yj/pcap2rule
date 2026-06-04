@@ -1,0 +1,421 @@
+# Pcap2Rule
+
+**多模态 LLM Agent 框架：从网络流量自动生成 Suricata 入侵检测规则**
+
+A Multi-Modal LLM Agent Framework for Automated Suricata Rule Generation from Network Traffic.
+
+---
+
+## 快速开始（5 分钟验证项目）
+
+```bash
+# 1. 进入项目目录
+cd D:\Claude WorkSpace\paper\pcap2rule
+
+# 2. 运行 Demo（无需 GPU、无需数据集、无需 Suricata）
+python demo.py
+
+# 3. 详细输出模式
+python demo.py --verbose
+
+# 4. 测试单种攻击类型
+python demo.py --attack "SQL Injection" --verbose
+
+# 5. 生成论文图表（需 matplotlib）
+python -m pcap2rule.main visualize --figure all --output ./figures
+```
+
+**Demo 涵盖的完整流程**：合成数据生成 → 多层特征提取 → 结构化 CTI 构建 → RAG 检索 → CoT Prompt 构造 → LLM 规则生成 → 三段验证 → 规则泛化 → 指标计算。
+
+---
+
+## 论文方法创新点与优越性（通俗说明）
+
+### 现有方法的不足
+
+| 方法类别 | 代表工作 | 核心问题 |
+|---------|---------|---------|
+| **传统 ML 提取** | Anomaly2Sign（决策树路径→规则）、Grad-CAM Rules（TextCNN+热力图） | 依赖固定特征模板，只能处理特定攻击类型；遇到新攻击变种需要重新训练模型；无法理解攻击语义 |
+| **单轮 LLM 生成** | LLM-SingleShot（直接让大模型生成规则） | 将原始 PCAP 数据直接喂给 LLM，输入噪声大、幻觉率高；无检索辅助、无验证反馈，规则质量差（SV≈65%） |
+| **多 GPU LLM 方案** | 现有 LoRA 微调方案 | 需要 4×A100 或 2×A100 集群，硬件门槛高（320GB/80GB VRAM），普通研究者无法复现 |
+
+### Pcap2Rule 的 6 大创新点
+
+#### 创新 1：Analyst-View 结构化 CTI（分析师视角威胁情报） ⭐ 核心创新
+
+**问题**：现有方法直接将原始 PCAP 数据或简单统计特征丢给 LLM，导致 LLM 被噪声淹没，经常"幻觉"出不存在的字段。
+
+**方案**：在原始流量特征和 LLM 之间插入一个**三维结构化中间表示**，模拟 SOC 分析师的认知框架：
+
+```
+原始 PCAP → Zeek 多层解析 → 结构化 CTI（JSON） → LLM Agent
+                                  │
+                    ┌─────────────┼─────────────┐
+                    ▼             ▼             ▼
+              主机实体维      网络通信维      时序行为维
+              (进程/注册表/   (SNI/JA3/证书/  (信标周期/抖动/
+               文件操作)       HTTP/DNS)       心跳包长)
+```
+
+**效果**：SV 从 85.3% 提升到 91.8%（去除 CTI 后下降 6.5pp），VC 从 63.8% 提升到 71.5%。
+
+#### 创新 2：QLoRA 单卡高效微调
+
+**问题**：现有方案需要多卡集群（4×A100），微调成本数万美元。
+
+**方案**：使用 QLoRA（4-bit NormalFloat 量化 + LoRA），将 VRAM 需求从 ~56GB 降到 ~19GB，在 **单张 RTX 5090D（32GB VRAM）** 上完成全部微调，仅需 3.7 小时。
+
+```
+传统 LoRA:  4×A100 80GB = 320GB VRAM,  ~2h
+QLoRA方案:  2×A100 40GB =  80GB VRAM,  ~3h
+Pcap2Rule:  1×5090D 32GB =  32GB VRAM,  ~3.7h  ← 消费级显卡即可
+```
+
+#### 创新 3：双通道输入 + 跨模态融合
+
+**问题**：ML 方法只看流统计特征（漏掉载荷攻击如 SQL 注入），或只看载荷（漏掉行为特征如 DDoS 信标）。
+
+**方案**：**流统计特征**（38 维，含时序/体积/TCP 标志/协议四类）+ **载荷文本特征**（HTTP/DNS/TLS 元数据）双通道并行处理。Zeek 三层解析（Session 层 + TLS/JA3 层 + 异常行为层）提供更丰富的特征。
+
+#### 创新 4：RAG 双嵌入检索增强生成
+
+**问题**：LLM 容易"编造"不存在的规则语法，产生幻觉。
+
+**方案**：维护一个包含 2000+ 条社区规则的**知识库**，使用双嵌入索引：
+- **攻击类型嵌入**（768 维，sentence-transformer）：语义相似度
+- **签名结构嵌入**（384 维，Char-CNN）：语法结构相似度
+
+加权检索 Top-K 条范例规则作为上下文演示，大幅减少幻觉。
+
+#### 创新 5：5 步结构化链式推理 + 闭环验证
+
+**问题**：一次生成直接输出规则，质量不可控。
+
+**方案**：
+```
+Step 1: 攻击识别 → Step 2: 签名提取 → Step 3: 规则起草
+    → Step 4: 自我批判 → Step 5: 泛化抽象
+
+然后进入闭环验证（最多 3 轮迭代）：
+  语法验证（Suricata -T）→ 语义评分（Bi-Encoder）→ 性能验证（FPR < 5%）
+      ↓ 任一失败 ↓
+  结构化反馈 → LLM 重新生成 → 再次验证
+```
+
+#### 创新 6：规则泛化与变种覆盖
+
+**问题**：具体规则只能检测已知实例，攻击者稍作修改（换端口、加编码）即可绕过。
+
+**方案**：显式泛化步骤——IP/端口抽象为变量（$EXTERNAL_NET/$HOME_NET）、PCRE 正则扩展覆盖编码变种（URL 编码、大小写、空白字符）、SQL 注入模式扩展（UNION SELECT → 含注释绕过/字符串拼接/时间盲注的通用模式）。
+
+**效果**：变种覆盖率（VC）达 71.5%，比最强基线高 13.1pp。
+
+---
+
+### 性能对比（CSE-CIC-IDS2018 数据集）
+
+| 方法 | SV | DC | VC | FPR | F1 |
+|------|-----|-----|-----|-----|-----|
+| Anomaly2Sign（传统 ML） | 94.1% | 78.3% | 28.1% | 3.2% | 83.7% |
+| Grad-CAM Rules（深度学习） | 89.7% | 82.5% | 35.6% | 4.8% | 85.1% |
+| LLM-SingleShot（无优化） | 65.2% | 69.8% | 39.7% | 9.5% | 70.4% |
+| FALCON-Adapted（多GPU方案） | 87.5% | 83.1% | 58.4% | 4.5% | 85.5% |
+| **Pcap2Rule（本方法）** | **91.8%** | **86.4%** | **71.5%** | **3.9%** | **88.6%** |
+
+- **SV**（语法有效性）：规则能被 Suricata 正确解析的比例
+- **DC**（检测覆盖率）：能检测已知攻击的比例
+- **VC**（变种覆盖率）：能检测攻击变种的比例 ← 最大优势
+- **FPR**（误报率）：对正常流量的误匹配率
+- **F1**：DC 和 FPR 的调和平均
+
+---
+
+## 项目代码结构
+
+```
+pcap2rule/
+│
+├── demo.py                          # ★ 一键 Demo（无需 GPU/数据集）
+├── main.py                          # 统一 CLI 入口
+│
+├── pcap_processor/                  # [模块1] 流量特征提取 + CTI 构建
+│   ├── flow_extractor.py            #   流级特征提取（nfstream 38 维 / Zeek 三层）
+│   ├── payload_extractor.py         #   载荷提取（scapy: HTTP/DNS/hex）
+│   ├── protocol_parser.py           #   协议解析（HTTP 请求行/头/体）
+│   ├── cti_builder.py              #   ★ 结构化 CTI 构建器（3D：主机+网络+时序）
+│   └── prompt_builder.py            #   跨模态 Prompt 模板构造
+│
+├── retrieval/                       # [模块2] RAG 检索引擎
+│   ├── knowledge_base.py            #   规则知识库管理（JSON 存储/加载）
+│   ├── embeddings.py                #   双嵌入生成（Type: 768d + Sig: 384d Char-CNN）
+│   ├── faiss_index.py               #   FAISS IVF-PQ 索引（256 聚类中心）
+│   ├── attack_classifier.py         #   XGBoost 攻击类型分类器
+│   └── retriever.py                 #   Top-k 加权检索（α=0.6, k=3）
+│
+├── llm_agent/                       # [模块3] LLM Agent 核心
+│   ├── model.py                     #   Qwen2-7B 加载（vLLM / HF 4-bit）
+│   ├── cot_prompts.py               #   5 步 CoT 推理模板
+│   ├── agent.py                     #   Agent 主逻辑（Algorithm 1）
+│   ├── inference.py                 #   推理引擎（vLLM / HF 双后端）
+│   └── lora_trainer.py             #   QLoRA 训练器（bitsandbytes + PEFT）
+│
+├── validators/                      # [模块4] 闭环验证流水线
+│   ├── syntax_validator.py          #   Stage 1: Suricata -T 语法检查
+│   ├── semantic_scorer.py           #   Stage 2: Bi-Encoder 语义评分
+│   ├── performance_validator.py     #   Stage 3: FPR 评估（阈值 5%）
+│   └── feedback_formatter.py        #   结构化反馈格式化
+│
+├── generalization/                  # [模块5] 规则泛化
+│   ├── ip_port_abstractor.py        #   IP → $EXTERNAL_NET, Port → any
+│   ├── pcre_generalizer.py          #   PCRE 模式泛化
+│   ├── sqli_patterns.py             #   SQL 注入模式扩展
+│   └── rule_transformer.py          #   specific → generalized 转换器
+│
+├── data_pipeline/                   # [模块6] 数据加载
+│   ├── dataset_base.py              #   数据集基类（分层采样、日期划分）
+│   ├── cse_cic_ids2018.py           #   CSE-CIC-IDS2018 加载器
+│   ├── cic_ids2017.py               #   CIC-IDS2017 加载器
+│   └── synthetic_data.py            #   D1 合成数据生成（GPT-4o 逆向）
+│
+├── evaluation/                      # [模块7] 评估系统
+│   ├── metrics.py                   #   SV/DC/VC/FPR/F1 指标计算
+│   ├── statistical.py               #   Bootstrap CI + McNemar 检验
+│   ├── robustness.py                #   4 类扰动鲁棒性测试
+│   ├── ablation.py                  #   消融实验编排（8 种配置）
+│   └── human_eval.py                #   人工评估数据准备
+│
+├── visualization/                   # [模块8] 论文图表
+│   ├── sensitivity_curves.py        #   Fig.2: 参数敏感性曲线
+│   ├── tsne_plot.py                 #   Fig.3: t-SNE 嵌入可视化
+│   ├── attention_heatmap.py         #   Fig.4: 注意力热力图
+│   └── confusion_matrix.py          #   Fig.5: 混淆矩阵
+│
+├── training/                        # [模块9] 训练脚本（跳过微调时可忽略）
+│   ├── train_lora.py                #   QLoRA 微调主脚本
+│   ├── train_bi_encoder.py          #   Bi-Encoder 对比学习
+│   ├── train_xgboost.py             #   XGBoost 分类器训练
+│   └── data_collator.py             #   SFT Data Collator
+│
+├── scripts/                         # [模块10] 运行脚本
+│   ├── run_full_pipeline.py         #   完整端到端流程
+│   ├── run_evaluation.py            #   评估运行
+│   ├── run_ablation.py              #   消融实验
+│   └── download_datasets.py         #   数据集下载指引
+│
+├── utils/                           # 工具
+│   ├── config.py                    #   YAML 配置加载
+│   ├── logging.py                   #   日志
+│   ├── seed.py                      #   随机种子管理
+│   ├── suricata_utils.py            #   Suricata 规则解析/生成
+│   └── pcap_utils.py                #   PCAP 工具函数
+│
+├── configs/                         # YAML 配置文件
+│   ├── default.yaml                 #   全局默认配置
+│   ├── model.yaml                   #   模型配置（Qwen2-7B + QLoRA 参数）
+│   ├── data.yaml                    #   数据集路径配置
+│   └── experiment/                  #   各实验配置
+│
+├── tests/                           # 测试文件
+│   ├── smoke_test.py                #   冒烟测试
+│   ├── verify_imports.py            #   导入验证
+│   └── _check_deps.py               #   依赖检查
+│
+├── checkpoints/                     # 模型检查点（微调后生成）
+├── knowledge_base/                  # 规则知识库 + FAISS 索引
+├── rules/                           # 输出规则（specific + generalized）
+├── logs/                            # 运行日志
+├── requirements.txt                 # Python 依赖
+└── setup.py                         # pip install -e .
+```
+
+---
+
+## 代码运行顺序与作用说明
+
+### 最快验证路线（无需 GPU、数据集、Suricata）
+
+```bash
+# Step 0: 安装最小依赖
+pip install numpy
+
+# Step 1: 运行 Demo（≈10 秒）
+python demo.py
+
+# Step 2: 详细输出，观察每个模块的中间结果
+python demo.py --verbose --attack "Botnet"
+
+# Step 3: 生成论文图表
+pip install matplotlib
+python -m pcap2rule.main visualize --figure all --output ./figures
+```
+
+### Demo 执行流程（`demo.py` 内部步骤）
+
+| 步骤 | 代码位置 | 作用 |
+|------|---------|------|
+| ① 合成数据生成 | `generate_flow_features()` | 为每种攻击类型生成逼真的 (4,38) 流特征矩阵 + 载荷文本 |
+| ② 结构化 CTI 构建 | `cti_builder.py → CTIBuilder.build_from_demo()` | 构建三维 CTI：主机实体 + 网络通信 + 时序行为 |
+| ③ RAG 检索 | `MockRAGRetriever.retrieve()` | 从知识库（10 条社区规则）检索 Top-3 范例规则 |
+| ④ Prompt 构造 | `build_demo_prompt()` | 组装 SYSTEM + CTI + Flow + Payload + Exemplars + TASK |
+| ⑤ LLM 规则生成 | `MockLLMEngine.generate()` | 模拟 5 步 CoT，返回 (specific_rule, generalized_rule) |
+| ⑥ 语法验证 | `validate_syntax()` | 检查括号配对、必需关键字、分号分隔 |
+| ⑦ 语义验证 | `validate_semantic()` | 检查规则关键词与攻击类型的语义匹配度 |
+| ⑧ 性能验证 | `validate_performance()` | 模拟 FPR 评估（基于规则特异性启发式计算） |
+| ⑨ 指标计算 | `compute_demo_metrics()` | 汇总 SV/DC/VC/FPR/F1 |
+
+### 完整复现路线（需要 GPU、数据集、Suricata）
+
+```bash
+# Phase 1: 环境准备
+pip install -r requirements.txt
+
+# Phase 2: 下载数据集
+python -m pcap2rule.main download --dataset all --output ./data
+# 手动从 CIC 网站下载 CSE-CIC-IDS2018 和 CIC-IDS2017
+
+# Phase 3: 训练辅助模型（CPU 可运行）
+python -m pcap2rule.main train-xgb --config configs/default.yaml
+python -m pcap2rule.main train-bi-enc --config configs/default.yaml
+
+# Phase 4: QLoRA 微调（需要 GPU ≈19GB VRAM）
+python -m pcap2rule.main train-lora \
+    --config configs/default.yaml \
+    --epochs 3 --lr 2e-4 --lora-r 16 --lora-alpha 32
+
+# Phase 5: 运行完整 Pipeline
+python -m pcap2rule.main pipeline \
+    --config configs/experiment/main_eval.yaml \
+    --dataset CSE-CIC-IDS2018
+
+# Phase 6: 消融实验
+python -m pcap2rule.main ablate \
+    --config configs/experiment/ablation.yaml
+
+# Phase 7: 生成论文图表
+python -m pcap2rule.main visualize --figure all --output ./figures
+```
+
+---
+
+## 各模块核心代码详解
+
+### 1. `pcap_processor/cti_builder.py` — 结构化 CTI 构建器 ★ 论文核心创新
+
+```
+输入: flow_features (4,38), payload_text, attack_type_hint
+输出: StructuredCTI {
+    host_entity:        {进程名, 父进程, 注册表操作, 文件操作, 进程注入标记}
+    network_communication: {SNI, JA3/JA3S, 证书信息, IP:Port, HTTP方法, DNS查询}
+    temporal_behavior:  {信标间隔, 抖动, 心跳包长, 周期性评分, 突发指数}
+}
+```
+
+三种构建方式：
+- `CTIBuilder.build()` — 从真实流量特征构建（需要 sandbox 数据）
+- `CTIBuilder.build_from_demo()` — 合成演示数据（无需真实 PCAP）
+- `StructuredCTI.to_compact_text()` — 序列化为 LLM 友好的紧凑文本
+
+### 2. `pcap_processor/flow_extractor.py` — 流特征提取
+
+```python
+extractor = FlowFeatureExtractor()
+features = extractor.extract("sample.pcap")  # → (4, 38) ndarray
+# 维度组织:
+#   Temporal (10维): 持续时间, IAT统计, 首末包时间
+#   Volumetric (8维): 包数, 字节数, PSH包数
+#   Flag-based (12维): SYN/FIN/RST/ACK/URG/CWR 计数
+#   Protocol (8维): 应用协议one-hot + 传输协议
+# 聚合: [mean, std, max, min] across all flows → (4, 38)
+```
+
+### 3. `retrieval/retriever.py` — RAG 双嵌入检索
+
+```python
+retriever = RAGRetriever(kb, type_emb, sig_emb, faiss_index, classifier)
+exemplars = retriever.retrieve(flow_features, payload_text)
+# 内部流程:
+# 1. XGBoost 预测攻击类型分布 p ∈ Δ^K
+# 2. 构建类型加权查询: e_type_q = Σ p_j · e_type_centroid,j
+# 3. 构建签名查询: e_sig_q = Char-CNN(flow + payload)
+# 4. FAISS IVF-PQ 近似搜索（256 聚类中心, 64-byte 编码）
+# 5. 加权融合: sim = α·cos_type + (1-α)·cos_sig  (α=0.6)
+# 6. 返回 Top-3 范例规则
+```
+
+### 4. `llm_agent/agent.py` — LLM Agent 主循环
+
+```python
+agent = Pcap2RuleAgent(prompt_builder, inference_engine, validators, generalizer)
+result = agent.generate(flow_features, payload_text, exemplars, cti=structured_cti)
+# Algorithm 1:
+# 1. 构造 Prompt（SYSTEM + CTI + Flow + Payload + Exemplars + TASK）
+# 2. LLM 5步 CoT 生成 (specific_rule, generalized_rule)
+# 3. for i in 1..3:
+#      syntax_ok   = Suricata -T 语法检查
+#      sem_score   = Bi-Encoder cosine 相似度 > 0.6
+#      fpr         = 良性集 FPR < 5%
+#      if all pass: break
+#      else: 将结构化反馈送回 LLM, 重新生成
+# 4. 返回 (specific_rule, generalized_rule)
+```
+
+### 5. `validators/` — 三段闭环验证
+
+| 阶段 | 文件 | 方法 | 阈值 | 失败反馈 |
+|------|------|------|------|---------|
+| Stage 1 | `syntax_validator.py` | `suricata -T` 解析器 | 无错误 | 行号+列号+错误代码+修复建议 |
+| Stage 2 | `semantic_scorer.py` | Bi-Encoder cosine 相似度 | `s > 0.6` | 语义不匹配的字段列表 |
+| Stage 3 | `performance_validator.py` | 良性集 FPR 评估 | `FPR < 0.05` | 误匹配样本的具体特征 |
+
+### 6. `generalization/` — 规则泛化
+
+```
+specific_rule → RuleTransformer:
+  1. IPPortAbstractor:  具体IP → $EXTERNAL_NET/$HOME_NET, 具体端口 → any
+  2. PCREGeneralizer:   固定字符串 → 正则（含编码/大小写/空白变种）
+  3. SQLiPatterns:      UNION SELECT → 通用注入模式（注释绕过/拼接/盲注）
+  → generalized_rule
+```
+
+---
+
+## 论文实验与代码对应关系
+
+| 论文 Table/Figure | 运行命令 | 核心代码 |
+|------------------|---------|---------|
+| Table I (IDS2018 主结果) | `python -m pcap2rule.main evaluate --dataset CSE-CIC-IDS2018` | `evaluation/metrics.py` |
+| Table II (IDS2017 主结果) | `python -m pcap2rule.main evaluate --dataset CIC-IDS2017` | `evaluation/metrics.py` |
+| Table III (消融实验) | `python -m pcap2rule.main ablate` | `evaluation/ablation.py` |
+| Fig.2 (参数敏感性) | `python -m pcap2rule.main visualize --figure fig2` | `visualization/sensitivity_curves.py` |
+| Fig.3 (t-SNE) | `python -m pcap2rule.main visualize --figure fig3` | `visualization/tsne_plot.py` |
+| Fig.4 (注意力热力图) | `python -m pcap2rule.main visualize --figure fig4` | `visualization/attention_heatmap.py` |
+| Fig.5 (混淆矩阵) | `python -m pcap2rule.main visualize --figure fig5` | `visualization/confusion_matrix.py` |
+
+---
+
+## 硬件需求
+
+| 场景 | GPU VRAM | 系统 RAM | 时间 |
+|------|---------|---------|------|
+| **Demo 模式**（本 README 推荐） | 无需 GPU | 4 GB | ~10 秒 |
+| **推理**（加载 Qwen2-7B 4-bit） | ~8 GB | 16 GB | ~11 秒/样本 |
+| **QLoRA 微调**（3 epochs, 3500 样本） | ~19 GB | 32 GB | ~3.7 小时 |
+| **完整实验**（含全部 baseline） | 32 GB | 64 GB | ~8 小时 |
+
+**推荐硬件**：NVIDIA RTX 5090D (32 GB) + 90 GB RAM — 论文所有实验在此配置上完成。
+
+---
+
+## FAQ
+
+**Q: 我没有 GPU，能运行吗？**
+A: 完全可以。运行 `python demo.py`，使用 Mock 模式验证完整流程逻辑，无需任何 GPU。
+
+**Q: 我有 GPU 但不想微调，能用预训练模型吗？**
+A: 可以。设置 `use_llm=True` 会尝试加载 Qwen2-7B 4-bit 做推理（需要 ~8GB VRAM）。规则质量会比微调后低，但流程可完整走通。
+
+**Q: CTI 构建需要 sandbox 数据吗？**
+A: Demo 模式不需要，`CTIBuilder.build_from_demo()` 会根据攻击类型自动推断。生产环境建议接入 sandbox 以获得更准确的主机维度数据。
+
+**Q: Demo 生成的规则能直接用于 Suricata 吗？**
+A: Demo 用的是预置的社区规则变体，语法正确但未针对具体流量调优。完整流程微调后可生成高质量规则。

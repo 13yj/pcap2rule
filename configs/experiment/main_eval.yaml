@@ -1,0 +1,27 @@
+# Main Evaluation Experiment Configuration (Table I & II)
+
+experiment:
+  name: "main_evaluation"
+  description: "Full system evaluation on CSE-CIC-IDS2018 and CIC-IDS2017"
+
+baselines:
+  - "Anomaly2Sign"
+  - "GradCAM_Rules"
+  - "LLM_SingleShot"
+  - "LLM_RAG"
+  - "FALCON_Adapted"
+
+metrics:
+  - "syntactic_validity"
+  - "detection_coverage"
+  - "variant_coverage"
+  - "false_positive_rate"
+  - "f1_score"
+
+datasets:
+  - name: "CSE-CIC-IDS2018"
+    num_attack_samples: 500
+    num_benign_samples: 200
+  - name: "CIC-IDS2017"
+    num_attack_samples: 500
+    num_benign_samples: 200

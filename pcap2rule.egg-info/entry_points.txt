@@ -1,0 +1,2 @@
+[console_scripts]
+pcap2rule = pcap2rule.main:main
